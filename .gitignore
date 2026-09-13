@@ -2,3 +2,4 @@
 /stagewise
 bin/
 *.test
+dist/
