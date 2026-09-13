@@ -109,3 +109,56 @@ JSON`
 		t.Fatalf("verify 1 failed: %s %s", so, se)
 	}
 }
+
+func writeProvider(t *testing.T, dir, name, title, checkJSON string) string {
+	t.Helper()
+	script := `#!/bin/sh
+cat >/dev/null
+cat <<'JSON'
+{"stages": [{"title": "` + title + `", "objective": "o", "contract": "c",
+"acceptance": ["a"], "mode": "auto", "checks": [` + checkJSON + `]}]}
+JSON`
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestAllowShellFalseBlocks(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	prov := writeProvider(t, dir, "sh-provider.sh", "Shell stage", `{"name": "piped", "shell": "echo hi | grep hi"}`)
+	project := t.TempDir()
+	if rc, _, se := runCLI(t, bin, project, "init", "--topic", "T", "--provider-cmd", prov); rc != 0 {
+		t.Fatalf("init failed: %s", se)
+	}
+	if rc, so, _ := runCLI(t, bin, project, "verify", "1"); rc != 0 {
+		t.Fatalf("shell check should pass when allowed: %s", so)
+	}
+	rc, so, _ := runCLI(t, bin, project, "verify", "1", "--allow-shell=false")
+	if rc == 0 || !strings.Contains(so, "blocked") {
+		t.Fatalf("expected blocked failure, rc=%d out=%s", rc, so)
+	}
+}
+
+func TestPlanRegenerate(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	v1 := writeProvider(t, dir, "v1.sh", "Original title", `{"name": "ok", "command": ["true"]}`)
+	v2 := writeProvider(t, dir, "v2.sh", "Regenerated title", `{"name": "ok", "command": ["true"]}`)
+	project := t.TempDir()
+	if rc, _, se := runCLI(t, bin, project, "init", "--topic", "T", "--provider-cmd", v1); rc != 0 {
+		t.Fatalf("init failed: %s", se)
+	}
+	if rc, _, se := runCLI(t, bin, project, "plan", "--regenerate", "1", "--extra", "better", "--provider-cmd", v2); rc != 0 {
+		t.Fatalf("regenerate failed: %s", se)
+	}
+	_, so, _ := runCLI(t, bin, project, "show", "1")
+	if !strings.Contains(so, "Regenerated title") {
+		t.Fatalf("expected new title, got: %s", so)
+	}
+	if _, err := os.Stat(filepath.Join(project, ".stagewise", "stages.json.bak")); err != nil {
+		t.Fatalf("expected backup file: %v", err)
+	}
+}

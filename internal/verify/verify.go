@@ -9,12 +9,18 @@ import (
 )
 
 // RunStage executes every planned check for one stage.
-func RunStage(ctx *runner.Context, st model.Stage) []model.CheckResult {
+// When allowShell is false, shell checks fail closed with a clear reason.
+func RunStage(ctx *runner.Context, st model.Stage, allowShell bool) []model.CheckResult {
 	var out []model.CheckResult
 	for i, c := range st.Checks {
 		name := c.Name
 		if name == "" {
 			name = fmt.Sprintf("check %d", i+1)
+		}
+		if c.Shell != "" && !allowShell {
+			start := time.Now()
+			out = append(out, ctx.Result(name, false, "blocked: shell check disabled (allow_shell=false); regenerate the plan without shell checks", start, nil, nil))
+			continue
 		}
 		timeout := time.Duration(c.TimeoutSeconds * float64(time.Second))
 		start := time.Now()

@@ -33,14 +33,32 @@ Add a compiled-in provider by implementing `provider.Provider` and calling `prov
 
 Plans declare checks as argv arrays (`command: ["go", "test", "./..."]`, exit 0 passes, no shell) or explicit `shell:` strings when a pipe is essential. Review any AI-generated plan (`plan`, `show N`, `plan --json`) before verifying.
 
+Lock shell checks out entirely — per run or permanently in `.stagewise/config.json` (`allow_shell`):
+
+```bash
+stagewise verify 3 --allow-shell=false
+```
+
+Blocked shell checks fail closed with a pointer to regenerate the plan.
+
+## Plan surgery
+
+Redo one bad stage without losing progress (history is keyed by stage number; the old plan is kept as `stages.json.bak`):
+
+```bash
+stagewise plan --regenerate 3 --extra "use table tests, no network"
+```
+
+Provider/model flags default to the ones stored at `init` and can be overridden per call.
+
 ## Commands
 
 ```bash
-stagewise init --topic "..." [--provider stub|anthropic] [--model ...] [--force]
-stagewise plan [--json]
+stagewise init --topic "..." [--provider stub|anthropic|openai] [--provider-cmd "..."] [--model ...] [--force]
+stagewise plan [--json] [--regenerate N --extra "..."]
 stagewise status [--json]
 stagewise show N
-stagewise verify next|N [--force]
+stagewise verify next|N [--force] [--allow-shell=false]
 stagewise evidence N --command "..." | --file ... [--note ...]
 stagewise approve N --note "..."
 stagewise report [--output ...]

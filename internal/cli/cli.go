@@ -131,6 +131,23 @@ func stageStatus(plan *model.Plan, n int, st *store.Store) string {
 	return "ready"
 }
 
+func makeProvider(name, cmd string, timeoutSecs float64) (provider.Provider, string, error) {
+	p, err := provider.Get(name)
+	if err != nil {
+		return nil, "", err
+	}
+	label := p.Name()
+	if cmd != "" {
+		argv := external.Split(cmd)
+		if len(argv) == 0 {
+			return nil, "", fmt.Errorf("empty --provider-cmd")
+		}
+		p = external.Command(argv, time.Duration(timeoutSecs*float64(time.Second)))
+		label = "external: " + argv[0]
+	}
+	return p, label, nil
+}
+
 func cmdInit(project string, args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	topic := fs.String("topic", "", "")
@@ -153,22 +170,12 @@ func cmdInit(project string, args []string) int {
 		fmt.Fprintf(os.Stderr, "Already initialised: %s (use --force to regenerate)\n", stagesPath)
 		return 2
 	}
-	p, err := provider.Get(*providerName)
+	p, label, err := makeProvider(*providerName, *providerCmd, *providerTimeout)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	providerLabel := p.Name()
-	if *providerCmd != "" {
-		argv := external.Split(*providerCmd)
-		if len(argv) == 0 {
-			fmt.Fprintln(os.Stderr, "empty --provider-cmd")
-			return 2
-		}
-		p = external.Command(argv, time.Duration(*providerTimeout*float64(time.Second)))
-		providerLabel = "external: " + argv[0]
-	}
-	fmt.Printf("Planning %q with %s...\n", *topic, providerLabel)
+	fmt.Printf("Planning %q with %s...\n", *topic, label)
 	plan, err := p.Plan(context.Background(), *topic, provider.Options{Model: *modelName, MaxStages: *maxStages, ExtraPrompt: *extra})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -178,7 +185,7 @@ func cmdInit(project string, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	cfg := map[string]any{"working_directory": *workdir, "timeout_seconds": *timeout, "provider": *providerName, "provider_cmd": *providerCmd, "model": *modelName}
+	cfg := map[string]any{"working_directory": *workdir, "timeout_seconds": *timeout, "provider": *providerName, "provider_cmd": *providerCmd, "provider_timeout": *providerTimeout, "model": *modelName, "allow_shell": true}
 	raw, _ := json.MarshalIndent(cfg, "", "  ")
 	_ = os.WriteFile(cfgPath, append(raw, '\n'), 0o644)
 	if err := store.SavePlan(stagesPath, plan); err != nil {
@@ -203,11 +210,19 @@ func cmdInit(project string, args []string) int {
 func cmdPlan(project string, args []string) int {
 	fs := flag.NewFlagSet("plan", flag.ContinueOnError)
 	asJSON := fs.Bool("json", false, "")
+	regen := fs.Int("regenerate", 0, "")
+	extra := fs.String("extra", "", "")
+	providerName := fs.String("provider", "", "")
+	providerCmd := fs.String("provider-cmd", "", "")
+	modelName := fs.String("model", "", "")
 	_ = fs.Parse(args)
 	l, err := loadAll(project)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
+	}
+	if *regen > 0 {
+		return cmdRegenerate(project, l, *regen, *extra, *providerName, *providerCmd, *modelName)
 	}
 	if *asJSON {
 		raw, _ := json.MarshalIndent(l.plan, "", "  ")
@@ -218,6 +233,73 @@ func cmdPlan(project string, args []string) int {
 	for _, st := range sortedStages(l.plan) {
 		fmt.Printf("%02d  [%-6s]  %s\n", st.Number, st.Mode, st.Title)
 	}
+	return 0
+}
+
+// cmdRegenerate redesigns one stage via the configured provider and splices
+// it back in, preserving progress history for every stage number.
+func cmdRegenerate(project string, l *loaded, n int, extra, providerName, providerCmd, modelName string) int {
+	old := findStage(l.plan, n)
+	if old == nil {
+		fmt.Fprintf(os.Stderr, "Unknown stage: %d\n", n)
+		return 2
+	}
+	cfg := readRawConfig(project)
+	if providerName == "" {
+		providerName, _ = cfg["provider"].(string)
+		if providerName == "" {
+			providerName = "stub"
+		}
+	}
+	if providerCmd == "" {
+		providerCmd, _ = cfg["provider_cmd"].(string)
+	}
+	if modelName == "" {
+		modelName, _ = cfg["model"].(string)
+	}
+	timeout := 120.0
+	if f, ok := cfg["provider_timeout"].(float64); ok && f > 0 {
+		timeout = f
+	}
+	p, label, err := makeProvider(providerName, providerCmd, timeout)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	scoped := fmt.Sprintf("The current plan for %q has %d stages. Keep EVERY stage exactly identical except stage %d (currently titled %q). Redesign ONLY stage %d to address the following, keeping its number and position. Return the FULL plan with all %d stages.",
+		l.plan.Topic, len(l.plan.Stages), n, old.Title, n, len(l.plan.Stages))
+	if extra != "" {
+		scoped += " Request: " + extra
+	}
+	fmt.Printf("Regenerating stage %d with %s...\n", n, label)
+	fresh, err := p.Plan(context.Background(), l.plan.Topic, provider.Options{Model: modelName, MaxStages: len(l.plan.Stages), ExtraPrompt: scoped})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	var replacement *model.Stage
+	for i := range fresh.Stages {
+		if fresh.Stages[i].Number == n {
+			replacement = &fresh.Stages[i]
+			break
+		}
+	}
+	if replacement == nil {
+		fmt.Fprintf(os.Stderr, "Provider did not return stage %d\n", n)
+		return 1
+	}
+	// Backup, splice, save.
+	if raw, err := json.MarshalIndent(l.plan, "", "  "); err == nil {
+		_ = os.WriteFile(l.planPath+".bak", append(raw, '\n'), 0o644)
+	}
+	fmt.Printf("Stage %d: %q -> %q\n", n, old.Title, replacement.Title)
+	*old = *replacement
+	old.Number = n
+	if err := store.SavePlan(l.planPath, l.plan); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Printf("Updated stage %d (backup: %s.bak). Prior runs for stage %d are kept in history; re-run verify %d.\n", n, l.planPath, n, n)
 	return 0
 }
 
@@ -319,17 +401,22 @@ func resolveStage(value string, l *loaded) (int, error) {
 	return n, nil
 }
 
-func readConfig(project string) (workdir string, timeout float64) {
+func readRawConfig(project string) map[string]any {
 	_, _, cfgPath, _, _ := store.Paths(project)
-	workdir, timeout = ".", 60
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
-		return
+		return map[string]any{}
 	}
 	var cfg map[string]any
 	if json.Unmarshal(raw, &cfg) != nil {
-		return
+		return map[string]any{}
 	}
+	return cfg
+}
+
+func readConfig(project string) (workdir string, timeout float64) {
+	cfg := readRawConfig(project)
+	workdir, timeout = ".", 60
 	if w, ok := cfg["working_directory"].(string); ok && w != "" {
 		workdir = w
 	}
@@ -342,15 +429,21 @@ func readConfig(project string) (workdir string, timeout float64) {
 func cmdVerify(project string, args []string) int {
 	force := false
 	stageArg := ""
+	allowShellFlag := ""
 	for _, a := range args {
-		if a == "--force" {
+		switch {
+		case a == "--force":
 			force = true
-		} else if stageArg == "" {
+		case a == "--allow-shell" || a == "--allow-shell=true":
+			allowShellFlag = "true"
+		case a == "--allow-shell=false":
+			allowShellFlag = "false"
+		case stageArg == "":
 			stageArg = a
 		}
 	}
 	if stageArg == "" {
-		fmt.Fprintln(os.Stderr, "usage: verify <stage|next> [--force]")
+		fmt.Fprintln(os.Stderr, "usage: verify <stage|next> [--force] [--allow-shell=false]")
 		return 2
 	}
 	l, err := loadAll(project)
@@ -369,6 +462,19 @@ func cmdVerify(project string, args []string) int {
 		return 2
 	}
 	fmt.Printf("Verifying stage %d: %s [%s]\n", number, st.Title, st.Mode)
+	cfg := readRawConfig(project)
+	allowShell := true
+	if v, ok := cfg["allow_shell"].(bool); ok {
+		allowShell = v
+	}
+	if allowShellFlag == "false" {
+		allowShell = false
+	} else if allowShellFlag == "true" {
+		allowShell = true
+	}
+	if !allowShell {
+		fmt.Println("shell checks disabled (allow_shell=false)")
+	}
 	workdir, timeout := readConfig(project)
 	ctx, err := runner.New(l.root, workdir, time.Duration(timeout*float64(time.Second)))
 	if err != nil {
@@ -376,7 +482,7 @@ func cmdVerify(project string, args []string) int {
 		return 1
 	}
 	defer ctx.Close()
-	results := verify.RunStage(ctx, *st)
+	results := verify.RunStage(ctx, *st, allowShell)
 	for _, r := range results {
 		if r.Passed {
 			fmt.Printf("PASS  %s\n", r.Name)
