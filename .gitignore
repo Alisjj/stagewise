@@ -1,0 +1,4 @@
+.stagewise/
+/stagewise
+bin/
+*.test
