@@ -86,3 +86,26 @@ func TestStubInitAndVerify(t *testing.T) {
 		t.Fatalf("report failed: %s", se)
 	}
 }
+
+func TestExternalProviderInit(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	// Any executable speaking plan-JSON on stdout is a provider.
+	script := `#!/bin/sh
+cat >/dev/null
+cat <<'JSON'
+{"stages": [{"title": "External stage", "objective": "o", "contract": "c",
+"acceptance": ["a"], "mode": "auto", "checks": [{"name": "ok", "command": ["true"]}]}]}
+JSON`
+	prov := filepath.Join(dir, "my-provider.sh")
+	if err := os.WriteFile(prov, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project := t.TempDir()
+	if rc, _, se := runCLI(t, bin, project, "init", "--topic", "Whatever", "--provider-cmd", prov); rc != 0 {
+		t.Fatalf("init via external provider failed: %s", se)
+	}
+	if rc, so, se := runCLI(t, bin, project, "verify", "1"); rc != 0 {
+		t.Fatalf("verify 1 failed: %s %s", so, se)
+	}
+}

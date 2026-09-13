@@ -22,6 +22,9 @@ type Options struct {
 
 var registry = map[string]func() Provider{}
 
+// ValidModes lists accepted stage modes.
+var ValidModes = map[string]bool{"auto": true, "hybrid": true, "manual": true}
+
 // Register adds a provider constructor.
 func Register(name string, fn func() Provider) {
 	registry[name] = fn

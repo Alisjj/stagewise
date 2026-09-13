@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"stagewise/internal/model"
+	"stagewise/internal/planjson"
 	"stagewise/internal/planner"
 	"stagewise/internal/provider"
 )
@@ -81,37 +82,12 @@ func (a *Anthropic) Plan(ctx context.Context, topic string, opts provider.Option
 			text.WriteString(c.Text)
 		}
 	}
-	plan, err := parsePlan(text.String())
+	plan, err := planjson.Parse(text.String())
 	if err != nil {
 		return nil, err
 	}
 	plan.Topic = topic
 	return plan, nil
-}
-
-func parsePlan(s string) (*model.Plan, error) {
-	s = strings.TrimSpace(s)
-	// Tolerate fenced output.
-	if i := strings.Index(s, "{"); i > 0 {
-		s = s[i:]
-	}
-	if i := strings.LastIndex(s, "}"); i >= 0 {
-		s = s[:i+1]
-	}
-	var plan model.Plan
-	if err := json.Unmarshal([]byte(s), &plan); err != nil {
-		return nil, fmt.Errorf("plan is not valid JSON: %w", err)
-	}
-	if len(plan.Stages) == 0 {
-		return nil, fmt.Errorf("plan contains no stages")
-	}
-	for i := range plan.Stages {
-		plan.Stages[i].Number = i + 1
-		if plan.Stages[i].Mode == "" {
-			plan.Stages[i].Mode = "manual"
-		}
-	}
-	return &plan, nil
 }
 
 func truncate(s string, n int) string {

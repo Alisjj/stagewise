@@ -21,7 +21,9 @@ import (
 	"stagewise/internal/verify"
 
 	_ "stagewise/internal/provider/anthropic"
+	_ "stagewise/internal/provider/openai"
 	_ "stagewise/internal/provider/stub"
+	"stagewise/internal/provider/external"
 
 	"stagewise/internal/provider"
 )
@@ -133,6 +135,8 @@ func cmdInit(project string, args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	topic := fs.String("topic", "", "")
 	providerName := fs.String("provider", "stub", "")
+	providerCmd := fs.String("provider-cmd", "", "")
+	providerTimeout := fs.Float64("provider-timeout", 120, "")
 	modelName := fs.String("model", "", "")
 	maxStages := fs.Int("max-stages", 12, "")
 	extra := fs.String("extra", "", "")
@@ -141,7 +145,7 @@ func cmdInit(project string, args []string) int {
 	timeout := fs.Float64("timeout", 60, "")
 	_ = fs.Parse(args)
 	if *topic == "" {
-		fmt.Fprintln(os.Stderr, "usage: init --topic \"Learn X\" [--provider anthropic] [--model ...] [--force]")
+		fmt.Fprintln(os.Stderr, "usage: init --topic \"Learn X\" [--provider anthropic] [--provider-cmd \".../my-provider\"] [--model ...] [--force]")
 		return 2
 	}
 	root, meta, cfgPath, stagesPath, progPath := store.Paths(project)
@@ -154,7 +158,17 @@ func cmdInit(project string, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 2
 	}
-	fmt.Printf("Planning %q with %s...\n", *topic, p.Name())
+	providerLabel := p.Name()
+	if *providerCmd != "" {
+		argv := external.Split(*providerCmd)
+		if len(argv) == 0 {
+			fmt.Fprintln(os.Stderr, "empty --provider-cmd")
+			return 2
+		}
+		p = external.Command(argv, time.Duration(*providerTimeout*float64(time.Second)))
+		providerLabel = "external: " + argv[0]
+	}
+	fmt.Printf("Planning %q with %s...\n", *topic, providerLabel)
 	plan, err := p.Plan(context.Background(), *topic, provider.Options{Model: *modelName, MaxStages: *maxStages, ExtraPrompt: *extra})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -164,7 +178,7 @@ func cmdInit(project string, args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	cfg := map[string]any{"working_directory": *workdir, "timeout_seconds": *timeout, "provider": *providerName, "model": *modelName}
+	cfg := map[string]any{"working_directory": *workdir, "timeout_seconds": *timeout, "provider": *providerName, "provider_cmd": *providerCmd, "model": *modelName}
 	raw, _ := json.MarshalIndent(cfg, "", "  ")
 	_ = os.WriteFile(cfgPath, append(raw, '\n'), 0o644)
 	if err := store.SavePlan(stagesPath, plan); err != nil {

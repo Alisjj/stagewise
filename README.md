@@ -19,7 +19,15 @@ stagewise --project ./myproject init --topic "Learn TCP in Go" \
   --provider anthropic --model <model-id> --max-stages 8 --force
 ```
 
-Add a provider by implementing `provider.Provider` and calling `provider.Register`.
+- `openai`: Chat Completions API (`OPENAI_API_KEY` + `--model`/`STAGEWISE_MODEL`, optional `OPENAI_BASE_URL` for compatibles).
+- **Anything else, no recompile**: `--provider-cmd` runs your own executable as the provider. It receives `{"topic", "max_stages", "extra", "model"}` on stdin and prints plan JSON (same schema as `.stagewise/stages.json`) on stdout, exit 0:
+
+```bash
+stagewise --project ./myproject init --topic "Learn TCP in Go" \
+  --provider-cmd "./my-provider --model foo"
+```
+
+Add a compiled-in provider by implementing `provider.Provider` and calling `provider.Register`.
 
 ## Checks
 
